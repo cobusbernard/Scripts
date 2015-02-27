@@ -1,10 +1,42 @@
 #!/bin/bash
 
+# Copied from http://willwarren.com/2014/07/03/roll-dynamic-dns-service-using-amazon-route53/
+
+# Externalizing the zone ID and CNAME
+if [ -z "$1" ]
+  then
+    echo "The first argument needs to be the Hosted Zone ID, i.e. BJBK35SKMM9OE"
+    exit 1
+fi
+
+if [ -z "$2" ]
+  then
+    echo "The second argument needs to be CNAME to update, i.e. example.com"
+    exit 1
+fi
+
+if [ -z "$3" ]
+  then
+    echo "The third argument needs to be AWS IAM role that has access to this domain, i.e. your-dns-updater"
+    exit 1
+fi
+
+
 # Hosted Zone ID e.g. BJBK35SKMM9OE
-ZONEID="enter zone id here"
+ZONEID=$1
 
 # The CNAME you want to update e.g. hello.example.com
-RECORDSET="enter cname here"
+RECORDSET=$2
+
+# The IAM user profile to use
+IAM_PROFILE=$3
+
+# Force the update
+if [ $4 = "1" ];
+  then
+  echo "Force update is set."
+    FORCE_UPDATE=1
+fi
 
 # More advanced options below
 # The Time-To-Live of this recordset
@@ -47,47 +79,52 @@ fi
 # Check if the IP has changed
 if [ ! -f "$IPFILE" ]
     then
-    touch "$IPFILE"
+      touch "$IPFILE"
 fi
 
 if grep -Fxq "$IP" "$IPFILE"; then
     # code if found
     echo "IP is still $IP. Exiting" >> "$LOGFILE"
-    exit 0
-else
-    echo "IP has changed to $IP" >> "$LOGFILE"
-    # Fill a temp file with valid JSON
-    TMPFILE=$(mktemp /tmp/temporary-file.XXXXXXXX)
-    cat > ${TMPFILE} << EOF
+    if [ -z "$FORCE_UPDATE" ]; then
+      echo "Exiting..."
+      exit 0
+    fi
+fi
+
+echo "IP has changed to $IP, updating ..."
+echo "IP has changed to $IP" >> "$LOGFILE"
+# Fill a temp file with valid JSON
+TMPFILE=$(mktemp /tmp/temporary-file.XXXXXXXX)
+cat > ${TMPFILE} << EOF
+{
+  "Comment":"$COMMENT",
+  "Changes":[
     {
-      "Comment":"$COMMENT",
-      "Changes":[
-        {
-          "Action":"UPSERT",
-          "ResourceRecordSet":{
-            "ResourceRecords":[
-              {
-                "Value":"$IP"
-              }
-            ],
-            "Name":"$RECORDSET",
-            "Type":"$TYPE",
-            "TTL":$TTL
+      "Action":"UPSERT",
+      "ResourceRecordSet":{
+        "ResourceRecords":[
+          {
+            "Value":"$IP"
           }
-        }
-      ]
+        ],
+        "Name":"$RECORDSET",
+        "Type":"$TYPE",
+        "TTL":$TTL
+      }
     }
+  ]
+}
 EOF
 
-    # Update the Hosted Zone record
-    aws route53 change-resource-record-sets \
-        --hosted-zone-id $ZONEID \
-        --change-batch file://"$TMPFILE" >> "$LOGFILE"
-    echo "" >> "$LOGFILE"
+# Update the Hosted Zone record
+aws route53 change-resource-record-sets \
+    --profile $IAM_PROFILE \
+    --hosted-zone-id $ZONEID \
+    --change-batch file://"$TMPFILE" >> "$LOGFILE"
+echo "" >> "$LOGFILE"
 
-    # Clean up
-    rm $TMPFILE
-fi
+# Clean up
+rm $TMPFILE
 
 # All Done - cache the IP address for next time
 echo "$IP" > "$IPFILE"
